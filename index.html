@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Scanner</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <style>
+        .fade-in { animation: fadeIn 0.3s ease-in; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .spinner {
+            border: 3px solid #e5e7eb;
+            border-top: 3px solid #4f46e5;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+
+<body class="bg-gray-100 p-10 min-h-screen">
+
+    <div class="max-w-5xl mx-auto bg-white p-8 rounded-lg shadow">
+
+        <!-- Header -->
+        <h1 class="text-3xl font-bold text-gray-800 mb-2">Document Scanner</h1>
+        <p class="text-gray-600 mb-6">Scan or upload documents from your device.</p>
+
+        <!-- Connection Indicator -->
+        <div id="connectionStatus" class="p-3 bg-gray-100 rounded flex items-center gap-2 mb-8">
+            <div class="spinner"></div>
+            <span>Connecting to scanner bridge...</span>
+        </div>
+
+        <!-- Actions -->
+        <div class="grid md:grid-cols-2 gap-6">
+
+            <!-- Scan button -->
+            <button id="scanBtn"
+                onclick="handleScan()"
+                disabled
+                class="border-2 border-dashed p-8 rounded-lg text-center cursor-not-allowed opacity-60 bg-gray-50">
+                <svg class="w-12 h-12 mx-auto mb-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                        d="M3 9a2 2 0 012-2h1a2 2 0 001.7-.9l.8-1.2A2 2 0 0110 4h4a2 2 0 011.7.9l.8 1.2A2 2 0 0018 7h1a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"/>
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                        d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/>
+                </svg>
+                <h2 class="text-xl font-semibold">Scan Document</h2>
+                <p class="text-gray-500 text-sm">Requires ScannerBridge</p>
+            </button>
+
+            <!-- Upload -->
+            <label class="border-2 border-dashed border-blue-300 p-8 rounded-lg text-center cursor-pointer hover:bg-blue-50">
+                <svg class="w-12 h-12 mx-auto mb-3 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                        d="M7 16a4 4 0 01-.9-8A5 5 0 1116 6a5 5 0 011 10M15 13l-3-3-3 3m3-3v12"/>
+                </svg>
+                <h2 class="text-xl font-semibold">Upload Files</h2>
+                <p class="text-gray-500 text-sm">Images or PDF</p>
+                <input id="fileInput" type="file" multiple accept="image/*,.pdf" class="hidden" onchange="handleFileUpload(event)">
+            </label>
+
+        </div>
+
+        <!-- Alert -->
+        <div id="messageAlert" class="hidden p-4 rounded mt-8 fade-in"></div>
+
+        <!-- Documents -->
+        <div id="documentsSection" class="hidden mt-10">
+            <div class="flex items-center justify-between mb-4">
+                <h2 class="text-xl font-semibold">
+                    Documents (<span id="docCount">0</span>)
+                </h2>
+                <button onclick="clearAllDocuments()" class="bg-gray-200 px-4 py-2 rounded hover:bg-gray-300">Clear All</button>
+            </div>
+
+            <div id="documentsGrid" class="grid md:grid-cols-3 gap-4"></div>
+        </div>
+
+        <!-- Instructions -->
+        <div class="mt-12 p-6 bg-gray-50 rounded">
+            <h3 class="font-semibold text-gray-800 mb-2">Setup Instructions</h3>
+            <p class="text-gray-600 text-sm">
+                • Install the ScannerBridge application<br>
+                • Connect your USB scanner<br>
+                • Use this page to scan or upload documents
+            </p>
+        </div>
+    </div>
+
+
+<script>
+const CONFIG = {
+    WS_URL: 'ws://localhost:8765',
+    MAX_FILE_SIZE: 10 * 1024 * 1024
+};
+
+let ws = null;
+let connected = false;
+let scanning = false;
+let scannedDocs = [];
+
+/* Connect to bridge */
+function connectToBridge() {
+    ws = new WebSocket(CONFIG.WS_URL);
+
+    ws.onopen = () => updateConnection(true);
+    ws.onclose = () => updateConnection(false);
+
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        handleServerMessage(data);
+    };
+}
+
+function updateConnection(isConnected) {
+    connected = isConnected;
+    const status = document.getElementById("connectionStatus");
+    const scanBtn = document.getElementById("scanBtn");
+
+    if (isConnected) {
+        status.className = "p-3 bg-green-100 rounded flex items-center gap-2 mb-8";
+        status.innerHTML = "✔ Connected to ScannerBridge";
+
+        scanBtn.disabled = false;
+        scanBtn.classList.remove("cursor-not-allowed", "opacity-60");
+    } else {
+        status.className = "p-3 bg-red-100 rounded flex items-center gap-2 mb-8";
+        status.innerHTML = "✖ ScannerBridge Offline";
+
+        scanBtn.disabled = true;
+        scanBtn.classList.add("cursor-not-allowed", "opacity-60");
+    }
+}
+
+function handleServerMessage(data) {
+    if (data.type === "scan_complete") {
+        addDocument(data.image, "Scanned Document");
+        showMessage("Document scanned successfully.", "green");
+    }
+    if (data.type === "error") {
+        showMessage(data.message, "red");
+    }
+}
+
+/* Scan */
+function handleScan() {
+    if (!connected) {
+        showMessage("ScannerBridge is not connected.", "red");
+        return;
+    }
+    ws.send(JSON.stringify({ type: "scan", dpi: 200 }));
+}
+
+/* Upload */
+function handleFileUpload(evt) {
+    const files = Array.from(evt.target.files);
+    for (const f of files) {
+        if (f.size > CONFIG.MAX_FILE_SIZE) {
+            showMessage("File too large.", "red");
+            continue;
+        }
+        const reader = new FileReader();
+        reader.onload = e => addDocument(e.target.result, f.name);
+        reader.readAsDataURL(f);
+    }
+}
+
+/* Add Document */
+function addDocument(data, name) {
+    scannedDocs.push({ id: Date.now(), data, name });
+    updateDocuments();
+}
+
+/* Document Display */
+function updateDocuments() {
+    const section = document.getElementById("documentsSection");
+    const grid = document.getElementById("documentsGrid");
+    const count = document.getElementById("docCount");
+
+    count.textContent = scannedDocs.length;
+
+    if (scannedDocs.length === 0) {
+        section.classList.add("hidden");
+        return;
+    }
+    section.classList.remove("hidden");
+
+    grid.innerHTML = scannedDocs.map(doc => `
+        <div class="bg-gray-50 rounded p-3 shadow relative">
+            <button class="absolute top-2 right-2 text-red-500" onclick="removeDocument(${doc.id})">✖</button>
+            <img src="${doc.data}" class="w-full h-40 object-cover rounded mb-2">
+            <p class="text-sm">${doc.name}</p>
+        </div>
+    `).join("");
+}
+
+function removeDocument(id) {
+    scannedDocs = scannedDocs.filter(d => d.id !== id);
+    updateDocuments();
+}
+
+function clearAllDocuments() {
+    scannedDocs = [];
+    updateDocuments();
+}
+
+/* Alerts */
+function showMessage(text, color="blue") {
+    const alert = document.getElementById("messageAlert");
+    alert.className = `p-4 rounded mt-8 fade-in bg-${color}-100 text-${color}-800`;
+    alert.textContent = text;
+    alert.classList.remove("hidden");
+}
+
+window.onload = connectToBridge;
+</script>
+
+</body>
+</html>
