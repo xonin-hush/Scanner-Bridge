@@ -1,0 +1,134 @@
+# Scanner Bridge
+
+Scanner Bridge is a two-part solution that lets any modern browser drive a local USB scanner without installing vendor-specific browser plugins. A lightweight Windows service (`final.py`) controls the scanner over TWAIN or WIA APIs and publishes scanned images over a WebSocket API that the included Tailwind-powered single-page app (`index.html`) consumes. The web UI also accepts manual uploads, providing a single document collection workflow whether or not a scanner is available.
+
+## Architecture
+
+```
++----------------------+        WebSocket (JSON/base64)        +-----------------------+
+|  Browser (index.html)|  <---------------------------------->  | Windows Scanner Bridge|
+|  • Tailwind UI       |                                        |  • TWAIN/WIA drivers  |
+|  • Upload fallback   |                                        |  • Auto-start + logs  |
++----------------------+                                        +-----------------------+
+```
+
+1. The workstation app runs on Windows, ensures it is installed in `%LOCALAPPDATA%\\Programs\\ScannerBridge`, requests elevation, creates a Task Scheduler entry, and exposes a WebSocket server on `ws://localhost:8765`.
+2. The browser app opens `index.html`, connects to the bridge, enables the **Scan Document** button when the socket is ready, and renders thumbnails for either scanned images or uploaded files.
+
+## Repository layout
+
+| Path | Description |
+| --- | --- |
+| `final.py` | Windows-native scanner service that manages installation, privilege elevation, WIA/TWAIN scanning, image post-processing, logging, and the WebSocket API. |
+| `index.html` | TailwindCSS UI that shows connection status, scan/upload actions, document gallery, and simple alerts. |
+| `README.md` | This document. |
+
+## Requirements
+
+### Workstation (bridge service)
+- Windows 10 or later with an available TWAIN or WIA-compatible scanner.
+- Python 3.8+.
+- Packages: `websockets`, `pillow`, `python-twain`, `pywin32`.
+- Optional: `pyinstaller` if you need a standalone executable.
+
+### Web UI host
+- Any static file server or HTTP-capable framework (for local testing you can use `python -m http.server 8000`).
+- Modern Chromium, Firefox, or Edge browser.
+
+## Installation (Windows scanner host)
+
+1. **Clone or download this repository** to the workstation that is connected to the scanner.
+2. **Install Python** from [python.org](https://www.python.org/downloads/) and ensure `python` is available on `PATH`.
+3. **Create an environment** (optional but recommended):
+   ```powershell
+   py -3 -m venv .venv
+   .\.venv\Scripts\activate
+   ```
+4. **Install dependencies**:
+   ```powershell
+   pip install websockets pillow python-twain pywin32
+   ```
+5. **Run the bridge**:
+   ```powershell
+   python final.py
+   ```
+   - On first launch the script copies itself to `%LOCALAPPDATA%\\Programs\\ScannerBridge`, restarts with administrative rights, creates/updates a Task Scheduler entry so it auto-starts on logon, and enforces a single-running instance.
+   - Logs are written to `scanner_bridge.log` alongside the executable.
+6. *(Optional)* **Bundle as an executable** if you prefer distribution without Python:
+   ```powershell
+   pip install pyinstaller
+   pyinstaller --onefile --noconsole final.py
+   ```
+
+## Running the web client
+
+1. Start a simple static server from the repository root:
+   ```bash
+   python -m http.server 8000
+   ```
+2. Navigate to `http://localhost:8000/index.html`.
+3. The banner at the top shows whether the page is connected to the bridge. When connected, the **Scan Document** button is enabled; otherwise, users can continue to upload PDFs or images directly.
+
+> **Tip:** The default WebSocket endpoint used by the UI is defined near the top of `index.html` (`WS_URL: 'ws://localhost:8765'`). Update it if you host the bridge on another machine or port.
+
+## Configuration
+
+The workstation service reads from the `CONFIG` dictionary near the top of `final.py`. Key options:
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `host` | `localhost` | Interface bound by the WebSocket server. Change to `0.0.0.0` to expose the bridge to the LAN. |
+| `port` | `8765` | WebSocket port. Must match the `WS_URL` used by the web UI. |
+| `default_dpi` | `200` | DPI used when the UI issues a `scan` command without specifying `dpi`. |
+| `max_clients` | `10` | Concurrent browser connections permitted. Additional clients receive an error immediately. |
+| `allowed_origins` | `['http://localhost', 'http://127.0.0.1']` | Hosts allowed to establish a socket (extend this list when deploying on an intranet). |
+| `log_level` | `logging.INFO` | Minimum level recorded both in `scanner_bridge.log` and stdout. |
+
+Update `CONFIG` before packaging or restart the service to apply changes when running from source.
+
+## WebSocket contract
+
+The UI and bridge exchange compact JSON messages:
+
+- **Client → Server**
+  - `{ "type": "scan", "dpi": 200 }` – start a scan at the requested DPI. The server rejects requests while another scan is running.
+  - `{ "type": "get_scanners" }` – returns `scanners_list` with TWAIN/WIA device names.
+  - `{ "type": "ping" }` – requests a `pong` heartbeat.
+- **Server → Client**
+  - `{ "type": "connected", "scanner_available": true, "scanner_name": "..." }` – sent immediately after a client connects.
+  - `{ "type": "scan_complete", "image": "data:image/png;base64,...", "dpi": 200 }` – delivered when the scanner returns an image (TWAIN or WIA). The payload is already browser-ready.
+  - `{ "type": "scanners_list", "scanners": [] }` – enumerates available devices.
+  - `{ "type": "pong" }` – heartbeat response with ISO timestamp.
+  - `{ "type": "error", "message": "..." }` – sent for invalid JSON, unknown commands, or scan failures.
+
+## Image processing pipeline
+
+1. Images are captured either via TWAIN (`twain.SourceManager`) or WIA (`WIA.CommonDialog`).
+2. The resulting bitmap is converted to a PIL image, constrained so that the longest edge is at most 2000px, and encoded as PNG. If the encoded payload exceeds ~5 MB it is recompressed as JPEG (~85% quality) before being base64-encoded.
+3. The UI directly renders the `data:image/...` URI and stores it in the page’s document gallery.
+
+## Auto-start & deployment notes
+
+- The bridge automatically creates a Task Scheduler job (highest privileges, `ONLOGON`, 30-second delay) named `ScannerBridge`. Use `schtasks /Query /TN ScannerBridge` to verify or delete it manually if needed.
+- A file-based lock in `%TEMP%` prevents multiple instances from running simultaneously.
+- Ensure Windows Defender Firewall allows inbound connections on the configured port if you plan to connect from another machine.
+
+## Troubleshooting checklist
+
+| Symptom | Resolution |
+| --- | --- |
+| **`TWAIN not available` warning** | Install `python-twain` (32-bit vs 64-bit must match your Python installation) or rely on WIA. |
+| **`WIA not available` info message** | Install `pywin32` and ensure Windows Image Acquisition service is running. |
+| **Browser shows “ScannerBridge Offline”** | Confirm `final.py` is running, verify port/host values match between `CONFIG` and `index.html`, and check firewalls. |
+| **`Scan already in progress` log** | Wait for the current scan to finish; the UI will receive either `scan_complete` or `error`. |
+| **Large scans fail to display** | Images above ~5 MB are recompressed automatically. If the issue persists, reduce DPI or paper size. |
+| **Auto-start skipped** | Re-run `final.py` with administrative rights so Task Scheduler entries can be created. |
+
+## Contributing
+
+1. Fork the repository and create a feature branch.
+2. Update `README.md` or inline code comments when you add/modify behavior.
+3. Provide clear reproduction steps or screenshots for UI-facing changes.
+4. Test on Windows hardware with at least one physical scanner before opening a pull request.
+
+Happy scanning!
