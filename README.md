@@ -20,7 +20,10 @@ Scanner Bridge is a two-part solution that lets any modern browser drive a local
 | Path | Description |
 | --- | --- |
 | `final.py` | Windows-native scanner service that manages installation, privilege elevation, WIA/TWAIN scanning, image post-processing, logging, and the WebSocket API. |
-| `index.html` | TailwindCSS UI that shows connection status, scan/upload actions, document gallery, and simple alerts. |
+| `index.html` | TailwindCSS UI that shows connection status, scan/upload actions, document gallery (persisted to `localStorage`), and simple alerts. |
+| `requirements.txt` / `requirements-dev.txt` | Pinned runtime and development dependencies. |
+| `tests/` | Pytest suite covering the image pipeline, WebSocket protocol, config loading, scanner lifecycle, and crash supervision. Runs on any OS. |
+| `.github/workflows/ci.yml` | CI: syntax check, lint, and tests on Ubuntu plus an import smoke test on Windows. |
 | `README.md` | This document. |
 
 ## Requirements
@@ -68,7 +71,8 @@ Scanner Bridge is a two-part solution that lets any modern browser drive a local
    python -m http.server 8000
    ```
 2. Navigate to `http://localhost:8000/index.html`.
-3. The banner at the top shows whether the page is connected to the bridge. When connected, the **Scan Document** button is enabled; otherwise, users can continue to upload PDFs or images directly.
+3. The banner at the top shows whether the page is connected to the bridge (and which scanner it found). When connected, the **Scan Document** button is enabled; otherwise, users can continue to upload PDFs or images directly. The button stays enabled even if no scanner was detected at startup — the bridge looks for hardware again on every scan request, so plugging a scanner in later just works.
+4. The document gallery is saved in the browser's `localStorage`, so scanned and uploaded documents survive a page refresh or accidental tab close. If storage fills up, the oldest documents are dropped from persistence (with an on-page notice) while staying visible in the current session. **Clear All** wipes both the gallery and the saved copy.
 
 > **Tip:** The default WebSocket endpoint used by the UI is `ws://localhost:8765`. To point at a bridge on another machine or port, append `?ws=ws://host:port` to the page URL (or edit `WS_URL` near the top of `index.html`).
 
@@ -118,7 +122,7 @@ The UI and bridge exchange compact JSON messages:
 
 1. Images are captured either via TWAIN (`twain.SourceManager`) or WIA (`WIA.CommonDialog`).
 2. The resulting bitmap is converted to a PIL image, constrained so that the longest edge is at most 2000px, and encoded as PNG. If the encoded payload exceeds ~5 MB it is recompressed as JPEG (~85% quality) before being base64-encoded.
-3. The UI directly renders the `data:image/...` URI and stores it in the page’s document gallery.
+3. The UI directly renders the `data:image/...` URI and stores it in the page’s document gallery (persisted to `localStorage`).
 
 ## Auto-start & deployment notes
 
@@ -138,14 +142,30 @@ The UI and bridge exchange compact JSON messages:
 | **`Origin not allowed` error on connect** | The page is served from a hostname the bridge doesn't trust. Add it to `allowed_origin_hosts` in `config.json`. |
 | **`Port ... in use` warnings in the log** | Another process (often a previous instance still shutting down) holds the port. The bridge retries automatically; if it gives up, free the port or change `port` in `config.json`. |
 | **`Scan already in progress` log** | Wait for the current scan to finish; the UI will receive either `scan_complete` or `error`. |
+| **`Scan timed out` error** | A scanner dialog was probably left open past `scan_timeout_seconds` (default 300 s). Close any driver dialogs and scan again — the bridge re-initializes the scanner automatically on the next request. |
 | **Large scans fail to display** | Images above ~5 MB are recompressed automatically. If the issue persists, reduce DPI or paper size. |
 | **Auto-start skipped** | The bridge falls back to a normal-privilege Task Scheduler entry when elevation is unavailable. If no task exists at all, check `scanner_bridge.log` for `[Startup]` errors. |
+
+## Development without a scanner (any OS)
+
+The service runs on macOS/Linux too — everything except the actual TWAIN/WIA hardware paths:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
+pytest                              # full test suite, no hardware needed
+python final.py --fake-scanner      # bridge that serves generated test pages
+python -m http.server 8000          # then open http://localhost:8000/index.html
+```
+
+`--fake-scanner` exercises the real protocol, timeout, and image pipeline end-to-end, so UI and server changes can be verified without Windows. The Windows-only code paths (installer, elevation, TWAIN/WIA acquisition, watchdog task) still deserve a manual smoke test on real hardware before a release.
 
 ## Contributing
 
 1. Fork the repository and create a feature branch.
 2. Update `README.md` or inline code comments when you add/modify behavior.
-3. Provide clear reproduction steps or screenshots for UI-facing changes.
-4. Test on Windows hardware with at least one physical scanner before opening a pull request.
+3. Run `pytest` and `ruff check final.py tests` locally (CI runs both).
+4. Provide clear reproduction steps or screenshots for UI-facing changes.
+5. Test on Windows hardware with at least one physical scanner before opening a pull request that touches the scanning paths.
 
 Happy scanning!

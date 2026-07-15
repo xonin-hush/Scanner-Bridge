@@ -1,6 +1,7 @@
 """
-Scanner Bridge Application - COM Threading Fixed
-This runs on the workstation and communicates with the web interface
+Scanner Bridge Application
+Runs on the workstation with the scanner and serves scans to the web
+interface over a WebSocket. See README.md for setup and configuration.
 """
 
 import argparse
@@ -899,7 +900,7 @@ class ScannerBridge:
         port = port or CONFIG['port']
         
         logger.info("=" * 60)
-        logger.info("Scanner Bridge v2.1 (COM Threading Fixed)")
+        logger.info("Scanner Bridge")
         logger.info("=" * 60)
         logger.info(f"Starting Scanner Bridge on ws://{host}:{port}")
         logger.info("Initializing scanner...")
@@ -1085,56 +1086,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-"""
-INSTALLATION INSTRUCTIONS:
-==========================
-
-1. Install Python 3.8+ from python.org
-
-2. Install required packages:
-   pip install websockets pillow python-twain pywin32
-
-3. Run the application:
-   python scanner_bridge_app.py
-
-4. To make it auto-start on Windows:
-   - Create a shortcut to scanner_bridge_app.py
-   - Press Win+R, type: shell:startup
-   - Place the shortcut in the Startup folder
-
-5. To compile to executable:
-   pip install pyinstaller
-   pyinstaller --onefile --noconsole scanner_bridge_app.py
-
-CONFIGURATION:
-==============
-Edit CONFIG dictionary in code:
-- host: 'localhost' (server address)
-- port: 8765 (WebSocket port)
-- default_dpi: 200 (scan quality)
-- max_clients: 10 (concurrent connections)
-
-SCANNER SUPPORT:
-================
-- TWAIN: Traditional scanner interface (requires python-twain)
-- WIA: Windows Image Acquisition (requires pywin32)
-- The app will try TWAIN first, then fall back to WIA
-
-TROUBLESHOOTING:
-================
-- Check scanner_bridge.log for detailed error messages
-- If scanner not detected, ensure drivers are installed
-- On Windows 10+, WIA is often more reliable than TWAIN
-- Check Windows Device Manager for scanner status
-- Firewall may block localhost:8765 (add exception)
-- For "Scan already in progress", wait for current scan to complete
-
-WHAT WAS FIXED IN v2.1:
-========================
-- Added pythoncom.CoInitialize() and CoUninitialize() to WIA methods
-- This fixes the "CoInitialize has not been called" error
-- COM objects now work correctly in executor threads
-- Scanner dialog will now appear properly when clicking "Scan Document"
-"""
