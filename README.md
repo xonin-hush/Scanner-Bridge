@@ -31,7 +31,7 @@ Scanner Bridge is a two-part solution that lets any modern browser drive a local
 ### Workstation (bridge service)
 - Windows 10 or later with an available TWAIN or WIA-compatible scanner.
 - Python 3.8+.
-- Packages: pinned in `requirements.txt` (`websockets`, `pillow`, plus `python-twain` and `pywin32` on Windows only).
+- Packages: pinned in `requirements.txt` (`websockets`, `pillow`, plus `pytwain` and `pywin32` on Windows only).
 - Optional: `pyinstaller` if you need a standalone executable. Development tools (pytest, ruff) are pinned in `requirements-dev.txt`.
 
 ### Web UI host
@@ -55,7 +55,7 @@ Scanner Bridge is a two-part solution that lets any modern browser drive a local
    ```powershell
    python final.py
    ```
-   - On first launch the script copies itself to `%LOCALAPPDATA%\\Programs\\ScannerBridge`, restarts with administrative rights, creates/updates a Task Scheduler entry so it auto-starts on logon, and enforces a single-running instance.
+   - On first launch the bridge requests elevation, creates/updates Task Scheduler entries so it auto-starts on logon (pointing at `python.exe final.py` when run from source), and enforces a single-running instance. The packaged executable additionally copies itself to `%LOCALAPPDATA%\\Programs\\ScannerBridge` and relaunches from there; source runs skip that self-install step.
    - Logs are written to `scanner_bridge.log` in `%LOCALAPPDATA%\Programs\ScannerBridge` (rotated at 1 MB, 3 backups kept). When running from source on other platforms, the log lands next to `final.py`.
 6. *(Optional)* For development, `python final.py --fake-scanner` serves generated test images without hardware (works on any OS), and `--no-install` skips the self-install/elevation/scheduler setup.
 7. *(Optional)* **Bundle as an executable** if you prefer distribution without Python:
@@ -136,7 +136,7 @@ The UI and bridge exchange compact JSON messages:
 
 | Symptom | Resolution |
 | --- | --- |
-| **`TWAIN not available` warning** | Install `python-twain` (32-bit vs 64-bit must match your Python installation) or rely on WIA. |
+| **`TWAIN not available` warning** | Install `pytwain` (32-bit vs 64-bit must match your Python installation) or rely on WIA. |
 | **`WIA not available` info message** | Install `pywin32` and ensure Windows Image Acquisition service is running. |
 | **Browser shows “ScannerBridge Offline”** | Confirm `final.py` is running, verify port/host values match between `CONFIG` and `index.html`, and check firewalls. |
 | **`Origin not allowed` error on connect** | The page is served from a hostname the bridge doesn't trust. Add it to `allowed_origin_hosts` in `config.json`. |

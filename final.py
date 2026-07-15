@@ -28,6 +28,12 @@ import time
 
 def ensure_installed(app_name="ScannerBridge"):
     """Copy this exe to a permanent folder in AppData if not already there."""
+    if not getattr(sys, 'frozen', False):
+        # Running from source: sys.executable is python.exe; copying it
+        # without the script would install a launcher that starts nothing.
+        logger.info("[Install] Running from source; skipping self-install.")
+        return
+
     target_dir = os.path.join(os.getenv("LOCALAPPDATA"), "Programs", app_name)
     os.makedirs(target_dir, exist_ok=True)
     
@@ -84,8 +90,12 @@ def run_as_admin():
         is_admin = False
 
     if not is_admin:
-        # Relaunch as admin
-        params = ' '.join([f'"{arg}"' for arg in sys.argv])
+        # Relaunch as admin. For a frozen exe argv[0] IS the executable and
+        # must not be repeated as a parameter (argparse would reject it and
+        # the elevated child would die instantly); for source runs argv[0]
+        # is the script path that python.exe needs.
+        args = sys.argv[1:] if getattr(sys, 'frozen', False) else sys.argv
+        params = ' '.join([f'"{arg}"' for arg in args])
         rc = ctypes.windll.shell32.ShellExecuteW(
             None, "runas", sys.executable, params, None, 1
         )
@@ -98,14 +108,18 @@ def run_as_admin():
             "continuing without admin rights."
         )
 
-def add_to_startup(app_name="ScannerBridge", exe_path=None):
-    """Create a Windows Task Scheduler entry for auto-start."""
-    if exe_path is None:
-        exe_path = sys.executable
+def launch_command() -> str:
+    """Quoted command line that starts this program (frozen exe, or python + script)."""
+    if getattr(sys, 'frozen', False):
+        return f'"{os.path.abspath(sys.executable)}"'
+    return f'"{os.path.abspath(sys.executable)}" "{os.path.abspath(__file__)}"'
 
-    # Normalize path to handle spaces and special characters
-    exe_path = os.path.abspath(exe_path)
-    
+
+def add_to_startup(app_name="ScannerBridge", command=None):
+    """Create a Windows Task Scheduler entry for auto-start."""
+    if command is None:
+        command = launch_command()
+
     # Check if task already exists
     try:
         result = subprocess.run(
@@ -119,7 +133,7 @@ def add_to_startup(app_name="ScannerBridge", exe_path=None):
             try:
                 subprocess.run([
                     "schtasks", "/Change", "/TN", app_name,
-                    "/TR", exe_path,
+                    "/TR", command,
                     "/RL", "HIGHEST"
                 ], check=True, capture_output=True, timeout=10)
                 logger.info(f"[Startup] Task '{app_name}' updated successfully.")
@@ -143,7 +157,7 @@ def add_to_startup(app_name="ScannerBridge", exe_path=None):
         # /DELAY 0000:30 adds 30 second delay to ensure system is ready
         base_cmd = [
             "schtasks", "/Create", "/TN", app_name,
-            "/TR", exe_path,
+            "/TR", command,
             "/SC", "ONLOGON",
             "/F",
             "/DELAY", "0000:30"  # 30 second delay after logon
@@ -183,21 +197,20 @@ def add_to_startup(app_name="ScannerBridge", exe_path=None):
         return False
 
 
-def add_watchdog_task(app_name="ScannerBridge", exe_path=None):
+def add_watchdog_task(app_name="ScannerBridge", command=None):
     """Create a Task Scheduler entry that relaunches the exe every 5 minutes.
 
     While the bridge is healthy, each relaunch exits instantly on the
     single-instance lock; after a crash or hard kill, the next firing
     resurrects the service within 5 minutes.
     """
-    if exe_path is None:
-        exe_path = sys.executable
-    exe_path = os.path.abspath(exe_path)
+    if command is None:
+        command = launch_command()
     task_name = f"{app_name}Watchdog"
 
     base_cmd = [
         "schtasks", "/Create", "/TN", task_name,
-        "/TR", exe_path,
+        "/TR", command,
         "/SC", "MINUTE", "/MO", "5",
         "/F"
     ]
@@ -1076,7 +1089,7 @@ def main():
     logging.getLogger().setLevel(level)
 
     if not TWAIN_AVAILABLE:
-        logger.warning("TWAIN not available. Install: pip install python-twain")
+        logger.warning("TWAIN not available. Install: pip install pytwain")
     if sys.platform == 'win32' and not WIA_AVAILABLE:
         logger.info("WIA not available. Install: pip install pywin32")
 
@@ -1093,12 +1106,11 @@ def main():
         run_as_admin()
 
         # Now we're running from the installed location; ensure the
-        # auto-start and watchdog tasks point at the correct path
-        installed_path = sys.executable
-        startup_success = add_to_startup("ScannerBridge", installed_path)
+        # auto-start and watchdog tasks point at the correct command
+        startup_success = add_to_startup("ScannerBridge")
         if not startup_success:
             logger.warning("[Startup] Failed to create/update startup task. Application may not start after restart.")
-        add_watchdog_task("ScannerBridge", installed_path)
+        add_watchdog_task("ScannerBridge")
 
     if args.fake_scanner:
         logger.warning("Running with --fake-scanner: scans are generated test images")
