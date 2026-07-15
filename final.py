@@ -4,12 +4,14 @@ This runs on the workstation and communicates with the web interface
 """
 
 import asyncio
+import errno
 import websockets
 import json
 import base64
 import logging
 import logging.handlers
 import sys
+import urllib.parse
 from pathlib import Path
 from typing import Optional, Set, List
 from datetime import datetime
@@ -235,6 +237,21 @@ def load_config(config_path: Optional[Path] = None) -> dict:
     except (json.JSONDecodeError, OSError) as e:
         logger.warning(f"Ignoring invalid config {config_path}: {e}")
     return config
+
+
+def origin_allowed(origin: Optional[str]) -> bool:
+    """Whether a WebSocket Origin header value may connect.
+
+    Absent or "null" origins are allowed (file:// pages, non-browser
+    clients); anything else must have a hostname on the allow-list.
+    """
+    if origin is None or origin == 'null':
+        return True
+    try:
+        hostname = urllib.parse.urlsplit(origin).hostname
+    except ValueError:
+        return False
+    return hostname in CONFIG['allowed_origin_hosts']
 
 
 def clamp_dpi(dpi) -> int:
@@ -651,7 +668,19 @@ class ScannerBridge:
 
     async def handle_client(self, websocket: websockets.WebSocketServerProtocol):
         """Handle WebSocket connection from web interface"""
-        
+
+        # Reject cross-site pages; any origin could otherwise trigger scans
+        # and read the resulting documents.
+        origin = websocket.request_headers.get('Origin')
+        if not origin_allowed(origin):
+            logger.warning(f"Rejected connection from disallowed origin: {origin}")
+            await websocket.send(json.dumps({
+                'type': 'error',
+                'message': 'Origin not allowed'
+            }))
+            await websocket.close()
+            return
+
         # Check client limit
         if len(self.clients) >= CONFIG['max_clients']:
             await websocket.send(json.dumps({
@@ -831,22 +860,48 @@ class ScannerBridge:
         else:
             logger.warning("[WARNING] No scanner detected - file upload mode only")
         
-        async with websockets.serve(
-            self.handle_client,
-            host,
-            port,
-            ping_interval=30,
-            ping_timeout=10
-        ):
+        # A crashed predecessor may still hold the port for a few seconds
+        # (or a stale instance may be shutting down) - retry instead of dying.
+        addr_in_use = (errno.EADDRINUSE, getattr(errno, 'WSAEADDRINUSE', errno.EADDRINUSE))
+        server = None
+        for attempt in range(1, CONFIG['port_retry_attempts'] + 1):
+            try:
+                server = await websockets.serve(
+                    self.handle_client,
+                    host,
+                    port,
+                    ping_interval=30,
+                    ping_timeout=10
+                )
+                break
+            except OSError as e:
+                if e.errno not in addr_in_use:
+                    raise
+                if attempt >= CONFIG['port_retry_attempts']:
+                    logger.error(f"Port {port} still in use after {attempt} attempts; giving up")
+                    raise
+                logger.warning(
+                    f"Port {port} in use; retrying in {CONFIG['port_retry_seconds']}s "
+                    f"({attempt}/{CONFIG['port_retry_attempts']})"
+                )
+                await asyncio.sleep(CONFIG['port_retry_seconds'])
+
+        if server is None:  # only reachable with port_retry_attempts <= 0
+            raise OSError(f"Could not bind ws://{host}:{port}")
+
+        try:
             logger.info("[OK] Scanner Bridge is running")
             logger.info("[OK] Open your web application to start scanning")
             logger.info("Press Ctrl+C to stop")
-            
+
             # Keep server running
             try:
                 await asyncio.Future()
             except asyncio.CancelledError:
                 logger.info("Server shutdown initiated")
+        finally:
+            server.close()
+            await server.wait_closed()
 
 def main():
     """Main entry point"""

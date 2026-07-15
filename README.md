@@ -130,6 +130,8 @@ The UI and bridge exchange compact JSON messages:
 | **`TWAIN not available` warning** | Install `python-twain` (32-bit vs 64-bit must match your Python installation) or rely on WIA. |
 | **`WIA not available` info message** | Install `pywin32` and ensure Windows Image Acquisition service is running. |
 | **Browser shows “ScannerBridge Offline”** | Confirm `final.py` is running, verify port/host values match between `CONFIG` and `index.html`, and check firewalls. |
+| **`Origin not allowed` error on connect** | The page is served from a hostname the bridge doesn't trust. Add it to `allowed_origin_hosts` in `config.json`. |
+| **`Port ... in use` warnings in the log** | Another process (often a previous instance still shutting down) holds the port. The bridge retries automatically; if it gives up, free the port or change `port` in `config.json`. |
 | **`Scan already in progress` log** | Wait for the current scan to finish; the UI will receive either `scan_complete` or `error`. |
 | **Large scans fail to display** | Images above ~5 MB are recompressed automatically. If the issue persists, reduce DPI or paper size. |
 | **Auto-start skipped** | Re-run `final.py` with administrative rights so Task Scheduler entries can be created. |
