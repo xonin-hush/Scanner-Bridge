@@ -120,7 +120,8 @@ The UI and bridge exchange compact JSON messages:
 ## Auto-start & deployment notes
 
 - The bridge automatically creates a Task Scheduler job (highest privileges, `ONLOGON`, 30-second delay) named `ScannerBridge`. Use `schtasks /Query /TN ScannerBridge` to verify or delete it manually if needed.
-- A file-based lock in `%TEMP%` prevents multiple instances from running simultaneously.
+- An OS-held file lock in `%TEMP%` prevents multiple instances from running simultaneously; it is released automatically however the process ends, so no stale lock can block a restart.
+- If the UAC elevation prompt is declined, the bridge keeps running without admin rights (scanning works normally; the auto-start task is created without highest privileges).
 - Ensure Windows Defender Firewall allows inbound connections on the configured port if you plan to connect from another machine.
 
 ## Troubleshooting checklist
@@ -134,7 +135,7 @@ The UI and bridge exchange compact JSON messages:
 | **`Port ... in use` warnings in the log** | Another process (often a previous instance still shutting down) holds the port. The bridge retries automatically; if it gives up, free the port or change `port` in `config.json`. |
 | **`Scan already in progress` log** | Wait for the current scan to finish; the UI will receive either `scan_complete` or `error`. |
 | **Large scans fail to display** | Images above ~5 MB are recompressed automatically. If the issue persists, reduce DPI or paper size. |
-| **Auto-start skipped** | Re-run `final.py` with administrative rights so Task Scheduler entries can be created. |
+| **Auto-start skipped** | The bridge falls back to a normal-privilege Task Scheduler entry when elevation is unavailable. If no task exists at all, check `scanner_bridge.log` for `[Startup]` errors. |
 
 ## Contributing
 

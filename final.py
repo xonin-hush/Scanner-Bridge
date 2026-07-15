@@ -61,10 +61,15 @@ def ensure_installed(app_name="ScannerBridge"):
             
             # Relaunch from new location with admin privileges
             # Use ShellExecute to ensure it runs with proper privileges
-            ctypes.windll.shell32.ShellExecuteW(
+            rc = ctypes.windll.shell32.ShellExecuteW(
                 None, "runas", target_path, "", None, 1
             )
-            sys.exit(0)
+            if rc > 32:  # relaunch actually started; hand over to it
+                sys.exit(0)
+            logger.warning(
+                f"[Install] Could not relaunch installed copy (code {rc}); "
+                "continuing from the current location."
+            )
         except Exception as e:
             logger.error(f"[Install] Failed to copy self: {e}")
             # Continue anyway - might already be in the right place
@@ -79,10 +84,17 @@ def run_as_admin():
     if not is_admin:
         # Relaunch as admin
         params = ' '.join([f'"{arg}"' for arg in sys.argv])
-        ctypes.windll.shell32.ShellExecuteW(
+        rc = ctypes.windll.shell32.ShellExecuteW(
             None, "runas", sys.executable, params, None, 1
         )
-        sys.exit(0)
+        if rc > 32:  # elevated relaunch actually started; hand over to it
+            sys.exit(0)
+        # UAC declined or ShellExecute failed: an unelevated bridge still
+        # works, so keep running rather than exiting with nothing started.
+        logger.warning(
+            f"[Startup] Elevation failed or was declined (code {rc}); "
+            "continuing without admin rights."
+        )
 
 def add_to_startup(app_name="ScannerBridge", exe_path=None):
     """Create a Windows Task Scheduler entry for auto-start."""
@@ -124,19 +136,29 @@ def add_to_startup(app_name="ScannerBridge", exe_path=None):
 
     # Create the task with proper settings
     try:
-        # Use /RU SYSTEM for highest privileges, or current user
-        # /RL HIGHEST ensures it runs with highest privileges
+        # /RL HIGHEST runs with highest privileges (requires elevation)
         # /SC ONLOGON runs at user logon
         # /DELAY 0000:30 adds 30 second delay to ensure system is ready
-        result = subprocess.run([
+        base_cmd = [
             "schtasks", "/Create", "/TN", app_name,
             "/TR", exe_path,
             "/SC", "ONLOGON",
-            "/RL", "HIGHEST",
             "/F",
             "/DELAY", "0000:30"  # 30 second delay after logon
-        ], check=True, capture_output=True, timeout=10)
-        
+        ]
+        try:
+            subprocess.run(base_cmd + ["/RL", "HIGHEST"],
+                           check=True, capture_output=True, timeout=10)
+        except subprocess.CalledProcessError as e:
+            # Without admin rights /RL HIGHEST is refused; a normal-privilege
+            # task still auto-starts the bridge, so fall back to that.
+            error_msg = e.stderr.decode(errors='ignore', encoding='utf-8') if e.stderr else str(e)
+            logger.warning(
+                f"[Startup] Elevated task creation failed ({error_msg.strip()}); "
+                "retrying without highest privileges."
+            )
+            subprocess.run(base_cmd, check=True, capture_output=True, timeout=10)
+
         # Verify task was created
         verify_result = subprocess.run(
             ["schtasks", "/Query", "/TN", app_name],
@@ -157,43 +179,31 @@ def add_to_startup(app_name="ScannerBridge", exe_path=None):
         error_msg = e.stderr.decode(errors='ignore', encoding='utf-8') if e.stderr else str(e)
         logger.warning(f"[Startup] Failed to create scheduled task: {error_msg}")
         return False
+_instance_lock_fd = None  # held for the process lifetime; the OS releases it on any death
+
+
 def ensure_single_instance(lock_name="scanner_bridge.lock"):
-    """Prevent multiple running instances using a file-based lock."""
+    """Prevent multiple running instances using an OS-held file lock.
+
+    The lock is held open rather than written: the OS releases it however the
+    process dies, so there are no stale lock files and no PID-reuse false
+    positives. This also lets a watchdog relaunch the exe freely - a redundant
+    launch exits here in milliseconds. No-op off Windows.
+    """
+    global _instance_lock_fd
+    if sys.platform != 'win32':
+        return
+
+    import msvcrt
     lock_path = os.path.join(os.getenv("TEMP", "."), lock_name)
-
-    # Check if lock file exists and process is alive
-    if os.path.exists(lock_path):
-        try:
-            with open(lock_path, "r") as f:
-                old_pid = int(f.read().strip())
-            
-            # Windows-native process check using OpenProcess
-            try:
-                kernel32 = ctypes.windll.kernel32
-                PROCESS_QUERY_INFORMATION = 0x0400
-                handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, old_pid)
-                if handle:
-                    kernel32.CloseHandle(handle)
-                    logger.info("[Startup] Instance already running, exiting.")
-                    sys.exit(0)
-            except Exception:
-                pass  # Process doesn't exist or can't access it
-        except Exception:
-            pass  # stale or corrupt file, ignore
-
-    # Write current PID to lock file
-    with open(lock_path, "w") as f:
-        f.write(str(os.getpid()))
-
-    # Register cleanup when exiting
-    import atexit
-    def remove_lock():
-        try:
-            if os.path.exists(lock_path):
-                os.remove(lock_path)
-        except Exception:
-            pass
-    atexit.register(remove_lock)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    try:
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    except OSError:
+        os.close(fd)
+        logger.info("[Startup] Instance already running, exiting.")
+        sys.exit(0)
+    _instance_lock_fd = fd
 
 
 # Configuration defaults; override via an optional config.json next to the app
