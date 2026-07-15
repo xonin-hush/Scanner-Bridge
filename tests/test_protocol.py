@@ -1,4 +1,5 @@
 import json
+import time
 
 import final
 
@@ -69,6 +70,31 @@ async def test_scan_failure_returns_error(bridge, fake_ws_factory, monkeypatch):
 
     assert ws.sent[-1]["type"] == "error"
     assert bridge.is_scanning is False
+
+
+async def test_scan_timeout_reports_error_and_frees_scanner(bridge, fake_ws_factory, monkeypatch):
+    monkeypatch.setitem(final.CONFIG, "scan_timeout_seconds", 0.05)
+    calls = []
+
+    def fake_scan(dpi, color_mode):
+        calls.append(1)
+        if len(calls) == 1:
+            time.sleep(0.5)  # hang past the timeout
+        return "data:image/png;base64,Zg=="
+
+    monkeypatch.setattr(bridge, "scan_document", fake_scan)
+    ws = fake_ws_factory(
+        incoming=[json.dumps({"type": "scan"}), json.dumps({"type": "scan"})]
+    )
+
+    await bridge.handle_client(ws)
+
+    types = [m["type"] for m in ws.sent]
+    # first scan: scanning -> timeout error; second scan: scanning -> complete
+    assert types == ["connected", "scanning", "error", "scanning", "scan_complete"]
+    assert "timed out" in ws.sent[2]["message"]
+    assert bridge.is_scanning is False
+    assert bridge.scanner_needs_reinit is True
 
 
 async def test_scan_rejected_while_scan_in_progress(bridge, fake_ws_factory):

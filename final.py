@@ -19,6 +19,7 @@ import ctypes
 import os
 import subprocess
 import shutil
+import threading
 import time
 
 def ensure_installed(app_name="ScannerBridge"):
@@ -304,6 +305,7 @@ class ScannerBridge:
         self.scanner_type: str = 'none'  # 'twain', 'wia', or 'none'
         self.clients: Set[websockets.WebSocketServerProtocol] = set()
         self.is_scanning: bool = False
+        self.scanner_needs_reinit: bool = False
         
     def initialize_scanner(self) -> bool:
         """Initialize scanner - try TWAIN first, then WIA"""
@@ -437,23 +439,14 @@ class ScannerBridge:
         if not self.scanner:
             logger.error("Scanner not initialized")
             return None
-        
-        if self.is_scanning:
-            logger.warning("Scan already in progress")
+
+        if self.scanner_type == 'twain':
+            return self.scan_with_twain(dpi, color_mode)
+        elif self.scanner_type == 'wia':
+            return self.scan_with_wia()
+        else:
+            logger.error(f"Unknown scanner type: {self.scanner_type}")
             return None
-        
-        self.is_scanning = True
-        
-        try:
-            if self.scanner_type == 'twain':
-                return self.scan_with_twain(dpi, color_mode)
-            elif self.scanner_type == 'wia':
-                return self.scan_with_wia()
-            else:
-                logger.error(f"Unknown scanner type: {self.scanner_type}")
-                return None
-        finally:
-            self.is_scanning = False
     
     def scan_with_twain(self, dpi: int = 200, color_mode: str = 'RGB') -> Optional[str]:
         """Scan using TWAIN"""
@@ -600,6 +593,36 @@ class ScannerBridge:
             logger.error(f"Image processing error: {e}", exc_info=True)
             return None
     
+    async def run_scan_with_timeout(self, dpi, color_mode) -> Optional[str]:
+        """Run the blocking scan in a daemon thread, bounded by scan_timeout_seconds.
+
+        A hung TWAIN/WIA driver call (e.g. an acquire dialog nobody dismisses)
+        cannot be killed from Python. A daemon thread is abandoned on timeout:
+        the driver may still hold the physical scanner until its dialog is
+        closed, but the bridge stays responsive and can exit cleanly.
+        """
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+
+        def deliver(setter, value):
+            if not future.done():
+                setter(value)
+
+        def worker():
+            try:
+                result = self.scan_document(dpi, color_mode)
+            except Exception as e:
+                callback, payload = future.set_exception, e
+            else:
+                callback, payload = future.set_result, result
+            try:
+                loop.call_soon_threadsafe(deliver, callback, payload)
+            except RuntimeError:
+                pass  # event loop already closed
+
+        threading.Thread(target=worker, daemon=True, name='scan').start()
+        return await asyncio.wait_for(future, timeout=CONFIG['scan_timeout_seconds'])
+
     async def handle_client(self, websocket: websockets.WebSocketServerProtocol):
         """Handle WebSocket connection from web interface"""
         
@@ -628,46 +651,60 @@ class ScannerBridge:
             async for message in websocket:
                 try:
                     data = json.loads(message)
-                    
-                    if data['type'] == 'scan':
+                    msg_type = data.get('type')
+
+                    if msg_type == 'scan':
                         logger.info(f"Scan requested by client {client_id}")
-                        
+
                         if self.is_scanning:
                             await websocket.send(json.dumps({
                                 'type': 'error',
                                 'message': 'Scan already in progress'
                             }))
                             continue
-                        
-                        await websocket.send(json.dumps({
-                            'type': 'scanning',
-                            'message': 'Initializing scanner...'
-                        }))
-                        
-                        # Perform scan in executor to avoid blocking
-                        loop = asyncio.get_event_loop()
-                        image_data = await loop.run_in_executor(
-                            None,
-                            self.scan_document,
-                            data.get('dpi', CONFIG['default_dpi']),
-                            data.get('color_mode', 'RGB')
-                        )
-                        
-                        if image_data:
+
+                        # Claim the scanner before the first await so two
+                        # clients can't pass the check together (the check
+                        # and set run atomically on the event loop).
+                        self.is_scanning = True
+                        try:
                             await websocket.send(json.dumps({
-                                'type': 'scan_complete',
-                                'image': image_data,
-                                'timestamp': datetime.now().isoformat(),
-                                'dpi': data.get('dpi', CONFIG['default_dpi'])
+                                'type': 'scanning',
+                                'message': 'Initializing scanner...'
                             }))
-                            logger.info(f"Scan completed for client {client_id}")
-                        else:
+
+                            image_data = await self.run_scan_with_timeout(
+                                data.get('dpi', CONFIG['default_dpi']),
+                                data.get('color_mode', 'RGB')
+                            )
+                        except asyncio.TimeoutError:
+                            logger.error(
+                                f"Scan timed out after {CONFIG['scan_timeout_seconds']}s; "
+                                "scanner will be re-initialized on the next scan"
+                            )
+                            self.scanner_needs_reinit = True
                             await websocket.send(json.dumps({
                                 'type': 'error',
-                                'message': 'Scan failed. Check scanner connection or try again.'
+                                'message': 'Scan timed out. Close any scanner dialogs and try again.'
                             }))
-                            
-                    elif data['type'] == 'get_scanners':
+                        else:
+                            if image_data:
+                                await websocket.send(json.dumps({
+                                    'type': 'scan_complete',
+                                    'image': image_data,
+                                    'timestamp': datetime.now().isoformat(),
+                                    'dpi': data.get('dpi', CONFIG['default_dpi'])
+                                }))
+                                logger.info(f"Scan completed for client {client_id}")
+                            else:
+                                await websocket.send(json.dumps({
+                                    'type': 'error',
+                                    'message': 'Scan failed. Check scanner connection or try again.'
+                                }))
+                        finally:
+                            self.is_scanning = False
+
+                    elif msg_type == 'get_scanners':
                         # List available scanners
                         scanners = self.list_scanners()
                         await websocket.send(json.dumps({
@@ -676,17 +713,17 @@ class ScannerBridge:
                         }))
                         logger.info(f"Scanner list sent to client {client_id}")
                         
-                    elif data['type'] == 'ping':
+                    elif msg_type == 'ping':
                         await websocket.send(json.dumps({
                             'type': 'pong',
                             'timestamp': datetime.now().isoformat()
                         }))
-                        
+
                     else:
-                        logger.warning(f"Unknown message type: {data['type']}")
+                        logger.warning(f"Unknown message type: {msg_type}")
                         await websocket.send(json.dumps({
                             'type': 'error',
-                            'message': f"Unknown message type: {data['type']}"
+                            'message': f"Unknown message type: {msg_type}"
                         }))
                         
                 except json.JSONDecodeError as e:
