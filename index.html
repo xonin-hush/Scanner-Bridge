@@ -126,10 +126,10 @@ function connectToBridge() {
     const socket = new WebSocket(CONFIG.WS_URL);
     ws = socket;
 
-    socket.onopen = () => {
-        reconnectDelay = CONFIG.RECONNECT_MIN_MS;
-        updateConnection(true);
-    };
+    // Note: backoff resets on the server's "connected" greeting, not here -
+    // a rejected connection (origin/client limit) opens then closes, and
+    // resetting on open would retry it every second forever.
+    socket.onopen = () => updateConnection(true);
 
     socket.onclose = () => {
         if (socket !== ws) return; // superseded by a newer connection
@@ -209,6 +209,7 @@ function refreshScanButton() {
 
 function handleServerMessage(data) {
     if (data.type === "connected") {
+        reconnectDelay = CONFIG.RECONNECT_MIN_MS; // the bridge accepted us
         const status = document.getElementById("connectionStatus");
         // Keep the button usable even without a scanner: the bridge
         // re-detects hardware on every scan request.
@@ -259,7 +260,12 @@ function handleFileUpload(evt) {
 function loadDocuments() {
     try {
         const raw = localStorage.getItem(CONFIG.STORAGE_KEY);
-        scannedDocs = raw ? JSON.parse(raw) : [];
+        const parsed = raw ? JSON.parse(raw) : [];
+        // Anything else on this origin can write our key; never let corrupt
+        // data break page init.
+        scannedDocs = Array.isArray(parsed)
+            ? parsed.filter(d => d && typeof d.data === "string")
+            : [];
     } catch (e) {
         console.warn("Could not restore saved documents", e);
         scannedDocs = [];

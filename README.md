@@ -88,7 +88,7 @@ The service starts from the `DEFAULT_CONFIG` dictionary near the top of `final.p
 | `port` | `8765` | WebSocket port. Must match the `WS_URL` used by the web UI. |
 | `default_dpi` | `200` | DPI used when the UI issues a `scan` command without specifying `dpi`. Requested values are clamped to 100–600. |
 | `max_clients` | `10` | Concurrent browser connections permitted. Additional clients receive an error immediately. |
-| `allowed_origin_hosts` | `["localhost", "127.0.0.1"]` | Browser origin hostnames allowed to open a socket (extend this list when deploying on an intranet). |
+| `allowed_origin_hosts` | `["localhost", "127.0.0.1"]` | Browser origin hostnames allowed to open a socket (extend this list when deploying on an intranet). Opening `index.html` directly from `file://` sends the literal origin `null`; add `"null"` to the list to allow that (off by default because sandboxed iframes on any website send the same value). |
 | `log_level` | `INFO` | Minimum level recorded in `scanner_bridge.log` and on the console. Use a string such as `"DEBUG"` in `config.json`. |
 | `scan_timeout_seconds` | `300` | How long a single scan may run before the bridge gives up and frees the scanner for new requests. |
 | `port_retry_seconds` / `port_retry_attempts` | `10` / `30` | How often and how many times to retry binding the WebSocket port when it is temporarily in use. |

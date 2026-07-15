@@ -95,6 +95,7 @@ async def test_scan_timeout_reports_error_and_frees_scanner(bridge, fake_ws_fact
     assert "timed out" in ws.sent[2]["message"]
     assert bridge.is_scanning is False
     assert bridge.scanner_needs_reinit is True
+    assert bridge.scanner_abandoned is True  # its handle must not be destroy()ed
 
 
 async def test_scan_rejected_while_scan_in_progress(bridge, fake_ws_factory):
@@ -105,6 +106,24 @@ async def test_scan_rejected_while_scan_in_progress(bridge, fake_ws_factory):
 
     assert ws.sent[-1]["type"] == "error"
     assert "in progress" in ws.sent[-1]["message"]
+
+
+async def test_get_scanners_returns_list(bridge, fake_ws_factory, monkeypatch):
+    monkeypatch.setattr(bridge, "list_scanners", lambda: ["TWAIN: X"])
+    ws = fake_ws_factory(incoming=[json.dumps({"type": "get_scanners"})])
+
+    await bridge.handle_client(ws)
+
+    assert ws.sent[-1] == {"type": "scanners_list", "scanners": ["TWAIN: X"]}
+
+
+async def test_get_scanners_rejected_while_scanning(bridge, fake_ws_factory):
+    bridge.is_scanning = True
+    ws = fake_ws_factory(incoming=[json.dumps({"type": "get_scanners"})])
+
+    await bridge.handle_client(ws)
+
+    assert ws.sent[-1]["type"] == "error"
 
 
 async def test_client_limit_rejects_new_connections(bridge, fake_ws_factory, monkeypatch):

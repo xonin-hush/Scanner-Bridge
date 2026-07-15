@@ -79,6 +79,24 @@ def test_reinit_flag_forces_release_and_fresh_init(bridge, monkeypatch):
     assert bridge.scanner_needs_reinit is False
 
 
+def test_release_skips_destroy_for_abandoned_handle(bridge):
+    calls = []
+
+    class Scanner:
+        def destroy(self):
+            calls.append(1)
+
+    bridge.scanner = Scanner()
+    bridge.scanner_type = "twain"
+    bridge.scanner_abandoned = True  # a hung scan thread may still hold it
+
+    bridge.release_scanner()
+
+    assert calls == []
+    assert bridge.scanner is None
+    assert bridge.scanner_abandoned is False
+
+
 def test_release_scanner_clears_state_even_when_destroy_raises(bridge):
     class ExplodingScanner:
         def destroy(self):

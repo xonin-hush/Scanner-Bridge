@@ -12,7 +12,7 @@ import final
     ("origin", "allowed"),
     [
         (None, True),  # non-browser client
-        ("null", True),  # page opened from file://
+        ("null", False),  # sandboxed iframes send this; must be opt-in
         ("http://localhost", True),
         ("http://localhost:8000", True),
         ("https://127.0.0.1:9999", True),
@@ -30,6 +30,12 @@ def test_origin_allowed_respects_config(monkeypatch):
 
     assert final.origin_allowed("http://scans.intranet.local:8000") is True
     assert final.origin_allowed("http://localhost") is False
+
+
+def test_null_origin_can_be_opted_in_for_file_pages(monkeypatch):
+    monkeypatch.setitem(final.CONFIG, "allowed_origin_hosts", ["localhost", "null"])
+
+    assert final.origin_allowed("null") is True
 
 
 async def test_disallowed_origin_is_rejected(bridge, fake_ws_factory):

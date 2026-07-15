@@ -294,11 +294,16 @@ def load_config(config_path: Optional[Path] = None) -> dict:
 def origin_allowed(origin: Optional[str]) -> bool:
     """Whether a WebSocket Origin header value may connect.
 
-    Absent or "null" origins are allowed (file:// pages, non-browser
-    clients); anything else must have a hostname on the allow-list.
+    An absent Origin header is allowed (non-browser clients). "null" is NOT
+    allowed by default - sandboxed iframes on any website send it, which
+    would bypass the allow-list; opening index.html from file:// also sends
+    it, so add "null" to allowed_origin_hosts to permit that workflow.
+    Anything else must have a hostname on the allow-list.
     """
-    if origin is None or origin == 'null':
+    if origin is None:
         return True
+    if origin == 'null':
+        return 'null' in CONFIG['allowed_origin_hosts']
     try:
         hostname = urllib.parse.urlsplit(origin).hostname
     except ValueError:
@@ -375,10 +380,16 @@ class ScannerBridge:
         self.clients: Set[websockets.WebSocketServerProtocol] = set()
         self.is_scanning: bool = False
         self.scanner_needs_reinit: bool = False
+        self.scanner_abandoned: bool = False
         
     def release_scanner(self):
-        """Release the current scanner handle, if any."""
-        if self.scanner is not None and self.scanner_type == 'twain':
+        """Release the current scanner handle, if any.
+
+        A handle abandoned by a timed-out scan may still be in use by the
+        hung driver thread; destroying it from here risks a native crash, so
+        in that case the reference is dropped without calling destroy().
+        """
+        if self.scanner is not None and self.scanner_type == 'twain' and not self.scanner_abandoned:
             try:
                 self.scanner.destroy()
             except Exception as e:
@@ -387,6 +398,7 @@ class ScannerBridge:
         self.scanner_name = None
         self.scanner_type = 'none'
         self.scanner_needs_reinit = False
+        self.scanner_abandoned = False
 
     def initialize_scanner(self) -> bool:
         """Initialize scanner - try TWAIN first, then WIA"""
@@ -790,6 +802,7 @@ class ScannerBridge:
                                 "scanner will be re-initialized on the next scan"
                             )
                             self.scanner_needs_reinit = True
+                            self.scanner_abandoned = True
                             await websocket.send(json.dumps({
                                 'type': 'error',
                                 'message': 'Scan timed out. Close any scanner dialogs and try again.'
@@ -812,8 +825,16 @@ class ScannerBridge:
                             self.is_scanning = False
 
                     elif msg_type == 'get_scanners':
-                        # List available scanners
-                        scanners = self.list_scanners()
+                        if self.is_scanning:
+                            await websocket.send(json.dumps({
+                                'type': 'error',
+                                'message': 'Busy scanning; try again shortly'
+                            }))
+                            continue
+                        # Device enumeration blocks on COM/TWAIN calls;
+                        # keep it off the event loop.
+                        scanners = await asyncio.get_running_loop().run_in_executor(
+                            None, self.list_scanners)
                         await websocket.send(json.dumps({
                             'type': 'scanners_list',
                             'scanners': scanners
