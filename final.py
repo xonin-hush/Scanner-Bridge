@@ -291,8 +291,8 @@ except ImportError:
 WIA_AVAILABLE = False
 if sys.platform == 'win32':
     try:
-        import win32com.client
-        import pythoncom
+        import win32com.client  # noqa: F401 - availability probe
+        import pythoncom  # noqa: F401 - availability probe
         WIA_AVAILABLE = True
     except ImportError:
         pass
@@ -476,7 +476,7 @@ class ScannerBridge:
             
             if rv:
                 (handle, count) = rv
-                logger.info(f"Image acquired, processing...")
+                logger.info("Image acquired, processing...")
                 
                 # Convert to PIL Image
                 try:
@@ -504,7 +504,7 @@ class ScannerBridge:
             if handle:
                 try:
                     twain.GlobalFree(handle)
-                except:
+                except Exception:
                     pass
     
     def scan_with_wia(self) -> Optional[str]:
