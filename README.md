@@ -28,8 +28,8 @@ Scanner Bridge is a two-part solution that lets any modern browser drive a local
 ### Workstation (bridge service)
 - Windows 10 or later with an available TWAIN or WIA-compatible scanner.
 - Python 3.8+.
-- Packages: `websockets`, `pillow`, `python-twain`, `pywin32`.
-- Optional: `pyinstaller` if you need a standalone executable.
+- Packages: pinned in `requirements.txt` (`websockets`, `pillow`, plus `python-twain` and `pywin32` on Windows only).
+- Optional: `pyinstaller` if you need a standalone executable. Development tools (pytest, ruff) are pinned in `requirements-dev.txt`.
 
 ### Web UI host
 - Any static file server or HTTP-capable framework (for local testing you can use `python -m http.server 8000`).
@@ -46,7 +46,7 @@ Scanner Bridge is a two-part solution that lets any modern browser drive a local
    ```
 4. **Install dependencies**:
    ```powershell
-   pip install websockets pillow python-twain pywin32
+   pip install -r requirements.txt
    ```
 5. **Run the bridge**:
    ```powershell
