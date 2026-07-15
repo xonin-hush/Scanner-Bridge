@@ -307,9 +307,21 @@ class ScannerBridge:
         self.is_scanning: bool = False
         self.scanner_needs_reinit: bool = False
         
+    def release_scanner(self):
+        """Release the current scanner handle, if any."""
+        if self.scanner is not None and self.scanner_type == 'twain':
+            try:
+                self.scanner.destroy()
+            except Exception as e:
+                logger.debug(f"Error releasing TWAIN scanner: {e}")
+        self.scanner = None
+        self.scanner_name = None
+        self.scanner_type = 'none'
+        self.scanner_needs_reinit = False
+
     def initialize_scanner(self) -> bool:
         """Initialize scanner - try TWAIN first, then WIA"""
-        
+
         # Try TWAIN first
         if TWAIN_AVAILABLE:
             logger.info("Attempting TWAIN scanner initialization...")
@@ -371,7 +383,14 @@ class ScannerBridge:
         """Initialize WIA scanner (Windows Image Acquisition)"""
         try:
             import win32com.client
-            
+            import pythoncom
+
+            # Ref-counted and safe to repeat. Deliberately not paired with
+            # CoUninitialize: the cached device object must outlive this call,
+            # and re-initialization may run on a fresh scan thread (scan
+            # threads set up COM for themselves in scan_with_wia).
+            pythoncom.CoInitialize()
+
             device_manager = win32com.client.Dispatch("WIA.DeviceManager")
             devices = device_manager.DeviceInfos
             
@@ -436,9 +455,14 @@ class ScannerBridge:
         Scan a document and return as base64 encoded image
         Routes to TWAIN or WIA based on scanner type
         """
-        if not self.scanner:
-            logger.error("Scanner not initialized")
-            return None
+        if self.scanner is None or self.scanner_needs_reinit:
+            # Heals a scanner plugged in after startup, a stale handle after
+            # a USB unplug, and the aftermath of a timed-out scan.
+            logger.info("(Re)initializing scanner before scan...")
+            self.release_scanner()
+            if not self.initialize_scanner():
+                logger.error("Scanner not initialized")
+                return None
 
         if self.scanner_type == 'twain':
             return self.scan_with_twain(dpi, color_mode)
@@ -488,9 +512,11 @@ class ScannerBridge:
                 
         except AttributeError as e:
             logger.error(f"TWAIN attribute error: {e}")
+            self.scanner_needs_reinit = True
             return None
         except Exception as e:
             logger.error(f"TWAIN scan error: {e}", exc_info=True)
+            self.scanner_needs_reinit = True
             return None
         finally:
             # Clean up handle
@@ -871,6 +897,8 @@ def main():
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
         sys.exit(1)
+    finally:
+        bridge.release_scanner()
 
 if __name__ == "__main__":
     main()
