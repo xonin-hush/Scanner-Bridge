@@ -70,7 +70,9 @@ Scanner Bridge is a two-part solution that lets any modern browser drive a local
 2. Navigate to `http://localhost:8000/index.html`.
 3. The banner at the top shows whether the page is connected to the bridge. When connected, the **Scan Document** button is enabled; otherwise, users can continue to upload PDFs or images directly.
 
-> **Tip:** The default WebSocket endpoint used by the UI is defined near the top of `index.html` (`WS_URL: 'ws://localhost:8765'`). Update it if you host the bridge on another machine or port.
+> **Tip:** The default WebSocket endpoint used by the UI is `ws://localhost:8765`. To point at a bridge on another machine or port, append `?ws=ws://host:port` to the page URL (or edit `WS_URL` near the top of `index.html`).
+
+If the connection drops (bridge restart, sleep/wake, network blip), the page reconnects automatically with exponential backoff (1 s doubling to 30 s, reset once connected) and shows the retry countdown in the status banner — no manual reload needed.
 
 ## Configuration
 

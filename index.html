@@ -98,29 +98,70 @@
 
 <script>
 const CONFIG = {
-    WS_URL: 'ws://localhost:8765',
-    MAX_FILE_SIZE: 10 * 1024 * 1024
+    // Override with ?ws=ws://host:port when the bridge runs elsewhere
+    WS_URL: new URLSearchParams(location.search).get("ws") || "ws://localhost:8765",
+    MAX_FILE_SIZE: 10 * 1024 * 1024,
+    RECONNECT_MIN_MS: 1000,
+    RECONNECT_MAX_MS: 30000
 };
 
 let ws = null;
 let connected = false;
 let scanning = false;
 let scannedDocs = [];
+let reconnectDelay = CONFIG.RECONNECT_MIN_MS;
+let reconnectTimer = null;
 
 /* Connect to bridge */
 function connectToBridge() {
-    ws = new WebSocket(CONFIG.WS_URL);
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
 
-    ws.onopen = () => updateConnection(true);
-    ws.onclose = () => updateConnection(false);
+    const socket = new WebSocket(CONFIG.WS_URL);
+    ws = socket;
 
-    ws.onmessage = (event) => {
-        const data = JSON.parse(event.data);
+    socket.onopen = () => {
+        reconnectDelay = CONFIG.RECONNECT_MIN_MS;
+        updateConnection(true);
+    };
+
+    socket.onclose = () => {
+        if (socket !== ws) return; // superseded by a newer connection
+        scheduleReconnect();
+    };
+
+    socket.onerror = () => {
+        console.warn("ScannerBridge socket error; waiting for close event");
+    };
+
+    socket.onmessage = (event) => {
+        let data;
+        try {
+            data = JSON.parse(event.data);
+        } catch (e) {
+            console.warn("Ignoring malformed message from bridge", e);
+            return;
+        }
         handleServerMessage(data);
     };
 }
 
-function updateConnection(isConnected) {
+function scheduleReconnect() {
+    if (reconnectTimer) return; // never stack timers
+    const delay = reconnectDelay;
+    reconnectDelay = Math.min(reconnectDelay * 2, CONFIG.RECONNECT_MAX_MS);
+    reconnectTimer = setTimeout(connectToBridge, delay);
+    updateConnection(false, delay);
+}
+
+window.addEventListener("online", () => {
+    if (!connected) {
+        reconnectDelay = CONFIG.RECONNECT_MIN_MS;
+        connectToBridge();
+    }
+});
+
+function updateConnection(isConnected, retryDelayMs) {
     connected = isConnected;
     const status = document.getElementById("connectionStatus");
     const scanBtn = document.getElementById("scanBtn");
@@ -133,7 +174,9 @@ function updateConnection(isConnected) {
         scanBtn.classList.remove("cursor-not-allowed", "opacity-60");
     } else {
         status.className = "p-3 bg-red-100 rounded flex items-center gap-2 mb-8";
-        status.innerHTML = "✖ ScannerBridge Offline";
+        status.innerHTML = retryDelayMs
+            ? `✖ ScannerBridge Offline — retrying in ${Math.ceil(retryDelayMs / 1000)}s…`
+            : "✖ ScannerBridge Offline";
 
         scanBtn.disabled = true;
         scanBtn.classList.add("cursor-not-allowed", "opacity-60");
