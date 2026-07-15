@@ -179,6 +179,39 @@ def add_to_startup(app_name="ScannerBridge", exe_path=None):
         error_msg = e.stderr.decode(errors='ignore', encoding='utf-8') if e.stderr else str(e)
         logger.warning(f"[Startup] Failed to create scheduled task: {error_msg}")
         return False
+
+
+def add_watchdog_task(app_name="ScannerBridge", exe_path=None):
+    """Create a Task Scheduler entry that relaunches the exe every 5 minutes.
+
+    While the bridge is healthy, each relaunch exits instantly on the
+    single-instance lock; after a crash or hard kill, the next firing
+    resurrects the service within 5 minutes.
+    """
+    if exe_path is None:
+        exe_path = sys.executable
+    exe_path = os.path.abspath(exe_path)
+    task_name = f"{app_name}Watchdog"
+
+    base_cmd = [
+        "schtasks", "/Create", "/TN", task_name,
+        "/TR", exe_path,
+        "/SC", "MINUTE", "/MO", "5",
+        "/F"
+    ]
+    try:
+        try:
+            subprocess.run(base_cmd + ["/RL", "HIGHEST"],
+                           check=True, capture_output=True, timeout=10)
+        except subprocess.CalledProcessError:
+            # Unelevated sessions can't create HIGHEST tasks; a normal task
+            # still resurrects the bridge.
+            subprocess.run(base_cmd, check=True, capture_output=True, timeout=10)
+        logger.info(f"[Startup] Watchdog task '{task_name}' ready (checks every 5 minutes).")
+        return True
+    except Exception as e:
+        logger.warning(f"[Startup] Failed to create watchdog task: {e}")
+        return False
 _instance_lock_fd = None  # held for the process lifetime; the OS releases it on any death
 
 
@@ -197,13 +230,20 @@ def ensure_single_instance(lock_name="scanner_bridge.lock"):
     import msvcrt
     lock_path = os.path.join(os.getenv("TEMP", "."), lock_name)
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
-    try:
-        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-    except OSError:
-        os.close(fd)
-        logger.info("[Startup] Instance already running, exiting.")
-        sys.exit(0)
-    _instance_lock_fd = fd
+    for attempt in range(2):
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            _instance_lock_fd = fd
+            return
+        except OSError:
+            if attempt == 0:
+                # A predecessor that just handed over to an elevated relaunch
+                # may still be exiting; give it a moment before concluding
+                # another instance is genuinely running.
+                time.sleep(1.0)
+    os.close(fd)
+    logger.info("[Startup] Instance already running, exiting.")
+    sys.exit(0)
 
 
 # Configuration defaults; override via an optional config.json next to the app
@@ -913,6 +953,44 @@ class ScannerBridge:
             server.close()
             await server.wait_closed()
 
+def _run_bridge(bridge):
+    asyncio.run(bridge.start_server())
+
+
+def run_supervised(bridge_factory, run_fn=_run_bridge, sleep_fn=time.sleep,
+                   monotonic_fn=time.monotonic):
+    """Run the server forever, restarting with backoff after crashes.
+
+    The backoff doubles from 1s to a 60s cap and resets after 10 minutes of
+    healthy uptime. Each attempt gets a fresh bridge so no poisoned state
+    survives a crash. KeyboardInterrupt stops the loop.
+    """
+    backoff = 1
+    while True:
+        bridge = bridge_factory()
+        started = monotonic_fn()
+        try:
+            run_fn(bridge)
+            return  # clean shutdown
+        except KeyboardInterrupt:
+            logger.info("Shutting down Scanner Bridge...")
+            return
+        except Exception as e:
+            logger.error(f"Server crashed: {e}", exc_info=True)
+        finally:
+            bridge.release_scanner()
+
+        if monotonic_fn() - started >= 600:
+            backoff = 1
+        logger.info(f"Restarting in {backoff}s...")
+        try:
+            sleep_fn(backoff)
+        except KeyboardInterrupt:
+            logger.info("Shutting down Scanner Bridge...")
+            return
+        backoff = min(backoff * 2, 60)
+
+
 def main():
     """Main entry point"""
     # Set UTF-8 encoding for Windows console early
@@ -939,31 +1017,24 @@ def main():
     if sys.platform == "win32":
         # First ensure we're installed to a safe location
         ensure_installed("ScannerBridge")
-        
+
+        # Exit if another instance is already running - checked BEFORE any
+        # elevation so the watchdog's periodic relaunches never raise a UAC
+        # prompt while the bridge is healthy.
+        ensure_single_instance()
+
         # Then ensure we have admin privileges
         run_as_admin()
-        
-        # Now we're running from the installed location with admin privileges
-        # Ensure startup task is created/updated with the correct path
+
+        # Now we're running from the installed location; ensure the
+        # auto-start and watchdog tasks point at the correct path
         installed_path = sys.executable
         startup_success = add_to_startup("ScannerBridge", installed_path)
         if not startup_success:
             logger.warning("[Startup] Failed to create/update startup task. Application may not start after restart.")
-        
-        # Ensure only one instance is running
-        ensure_single_instance()
-    
-    bridge = ScannerBridge()
+        add_watchdog_task("ScannerBridge", installed_path)
 
-    try:
-        asyncio.run(bridge.start_server())
-    except KeyboardInterrupt:
-        logger.info("Shutting down Scanner Bridge...")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
-        sys.exit(1)
-    finally:
-        bridge.release_scanner()
+    run_supervised(ScannerBridge)
 
 if __name__ == "__main__":
     main()

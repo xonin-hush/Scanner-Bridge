@@ -120,6 +120,7 @@ The UI and bridge exchange compact JSON messages:
 ## Auto-start & deployment notes
 
 - The bridge automatically creates a Task Scheduler job (highest privileges, `ONLOGON`, 30-second delay) named `ScannerBridge`. Use `schtasks /Query /TN ScannerBridge` to verify or delete it manually if needed.
+- **Crash recovery is two-layered.** Inside the process, a supervisor loop restarts the WebSocket server after unhandled errors with exponential backoff (1 s doubling to 60 s, reset after 10 minutes of healthy uptime). Outside it, a `ScannerBridgeWatchdog` Task Scheduler job relaunches the executable every 5 minutes; while the bridge is healthy each relaunch exits immediately on the single-instance lock, and after a hard kill the next firing resurrects the service. Remove it with `schtasks /Delete /TN ScannerBridgeWatchdog /F` if you uninstall the bridge.
 - An OS-held file lock in `%TEMP%` prevents multiple instances from running simultaneously; it is released automatically however the process ends, so no stale lock can block a restart.
 - If the UAC elevation prompt is declined, the bridge keeps running without admin rights (scanning works normally; the auto-start task is created without highest privileges).
 - Ensure Windows Defender Firewall allows inbound connections on the configured port if you plan to connect from another machine.
