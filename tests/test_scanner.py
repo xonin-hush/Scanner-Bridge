@@ -1,5 +1,17 @@
 """Scanner lifecycle: lazy (re)initialization and release."""
 
+import final
+
+
+def test_fake_scanner_produces_a_png_scan(monkeypatch):
+    fake = final.FakeScannerBridge()
+    monkeypatch.setattr(final.time, "sleep", lambda s: None)
+
+    result = fake.scan_document(200, "RGB")
+
+    assert result.startswith("data:image/png;base64,")
+    assert fake.scanner_name == "Fake Scanner (dev mode)"
+
 
 def test_scan_reinitializes_missing_scanner(bridge, monkeypatch):
     inits = []

@@ -3,6 +3,7 @@ Scanner Bridge Application - COM Threading Fixed
 This runs on the workstation and communicates with the web interface
 """
 
+import argparse
 import asyncio
 import errno
 import websockets
@@ -953,6 +954,47 @@ class ScannerBridge:
             server.close()
             await server.wait_closed()
 
+class FakeScannerBridge(ScannerBridge):
+    """Dev/test bridge that fabricates scans instead of driving hardware.
+
+    Exercises the real protocol, timeout, and image pipeline end-to-end on
+    machines without a scanner (or without Windows). Enable with
+    --fake-scanner.
+    """
+
+    def initialize_scanner(self) -> bool:
+        self.scanner = object()
+        self.scanner_name = 'Fake Scanner (dev mode)'
+        self.scanner_type = 'fake'
+        logger.info("Fake scanner initialized")
+        return True
+
+    def scan_document(self, dpi: int = 200, color_mode: str = 'RGB') -> Optional[str]:
+        if self.scanner is None or self.scanner_needs_reinit:
+            self.release_scanner()
+            self.initialize_scanner()
+
+        dpi = clamp_dpi(dpi)
+        time.sleep(1)  # simulate hardware latency
+
+        from PIL import ImageDraw
+        image = Image.new('RGB', (1240, 1754), color=(245, 245, 240))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle([40, 40, 1200, 1714], outline=(180, 180, 180), width=3)
+        draw.text((80, 80), f"Fake scan @ {dpi} DPI", fill=(20, 20, 20))
+        draw.text((80, 120), datetime.now().isoformat(), fill=(20, 20, 20))
+        return self.process_image(image)
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Scanner Bridge service")
+    parser.add_argument('--fake-scanner', action='store_true',
+                        help='serve generated test images instead of real hardware (development)')
+    parser.add_argument('--no-install', action='store_true',
+                        help='skip self-install/elevation/scheduler setup (development on Windows)')
+    return parser.parse_args(argv)
+
+
 def _run_bridge(bridge):
     asyncio.run(bridge.start_server())
 
@@ -993,6 +1035,8 @@ def run_supervised(bridge_factory, run_fn=_run_bridge, sleep_fn=time.sleep,
 
 def main():
     """Main entry point"""
+    args = parse_args()
+
     # Set UTF-8 encoding for Windows console early
     if sys.platform == 'win32':
         try:
@@ -1014,7 +1058,7 @@ def main():
     if sys.platform == 'win32' and not WIA_AVAILABLE:
         logger.info("WIA not available. Install: pip install pywin32")
 
-    if sys.platform == "win32":
+    if sys.platform == "win32" and not args.no_install:
         # First ensure we're installed to a safe location
         ensure_installed("ScannerBridge")
 
@@ -1034,7 +1078,10 @@ def main():
             logger.warning("[Startup] Failed to create/update startup task. Application may not start after restart.")
         add_watchdog_task("ScannerBridge", installed_path)
 
-    run_supervised(ScannerBridge)
+    if args.fake_scanner:
+        logger.warning("Running with --fake-scanner: scans are generated test images")
+
+    run_supervised(FakeScannerBridge if args.fake_scanner else ScannerBridge)
 
 if __name__ == "__main__":
     main()
