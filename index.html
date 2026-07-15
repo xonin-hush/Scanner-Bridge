@@ -52,7 +52,7 @@
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
                         d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"/>
                 </svg>
-                <h2 class="text-xl font-semibold">Scan Document</h2>
+                <h2 id="scanBtnLabel" class="text-xl font-semibold">Scan Document</h2>
                 <p class="text-gray-500 text-sm">Requires ScannerBridge</p>
             </button>
 
@@ -102,7 +102,11 @@ const CONFIG = {
     WS_URL: new URLSearchParams(location.search).get("ws") || "ws://localhost:8765",
     MAX_FILE_SIZE: 10 * 1024 * 1024,
     RECONNECT_MIN_MS: 1000,
-    RECONNECT_MAX_MS: 30000
+    RECONNECT_MAX_MS: 30000,
+    // Slightly longer than the bridge's scan_timeout_seconds (300 s) so the
+    // server-side timeout error normally arrives first.
+    SCAN_TIMEOUT_MS: 330000,
+    STORAGE_KEY: "scannerBridgeDocs"
 };
 
 let ws = null;
@@ -111,6 +115,8 @@ let scanning = false;
 let scannedDocs = [];
 let reconnectDelay = CONFIG.RECONNECT_MIN_MS;
 let reconnectTimer = null;
+let scanTimeoutTimer = null;
+let docSeq = 0;
 
 /* Connect to bridge */
 function connectToBridge() {
@@ -163,32 +169,63 @@ window.addEventListener("online", () => {
 
 function updateConnection(isConnected, retryDelayMs) {
     connected = isConnected;
+    setScanning(false); // a fresh or lost connection can't have a scan pending
     const status = document.getElementById("connectionStatus");
-    const scanBtn = document.getElementById("scanBtn");
 
     if (isConnected) {
         status.className = "p-3 bg-green-100 rounded flex items-center gap-2 mb-8";
-        status.innerHTML = "✔ Connected to ScannerBridge";
-
-        scanBtn.disabled = false;
-        scanBtn.classList.remove("cursor-not-allowed", "opacity-60");
+        status.textContent = "✔ Connected to ScannerBridge";
     } else {
         status.className = "p-3 bg-red-100 rounded flex items-center gap-2 mb-8";
-        status.innerHTML = retryDelayMs
+        status.textContent = retryDelayMs
             ? `✖ ScannerBridge Offline — retrying in ${Math.ceil(retryDelayMs / 1000)}s…`
             : "✖ ScannerBridge Offline";
-
-        scanBtn.disabled = true;
-        scanBtn.classList.add("cursor-not-allowed", "opacity-60");
     }
 }
 
+function setScanning(isScanning) {
+    scanning = isScanning;
+    clearTimeout(scanTimeoutTimer);
+    scanTimeoutTimer = null;
+    if (isScanning) {
+        // Fallback in case neither scan_complete nor an error ever arrives
+        scanTimeoutTimer = setTimeout(() => {
+            setScanning(false);
+            showMessage("No response from the scanner bridge. Please try again.", "red");
+        }, CONFIG.SCAN_TIMEOUT_MS);
+    }
+    refreshScanButton();
+}
+
+function refreshScanButton() {
+    const scanBtn = document.getElementById("scanBtn");
+    const disabled = !connected || scanning;
+    scanBtn.disabled = disabled;
+    scanBtn.classList.toggle("cursor-not-allowed", disabled);
+    scanBtn.classList.toggle("opacity-60", disabled);
+    document.getElementById("scanBtnLabel").textContent =
+        scanning ? "Scanning…" : "Scan Document";
+}
+
 function handleServerMessage(data) {
+    if (data.type === "connected") {
+        const status = document.getElementById("connectionStatus");
+        // Keep the button usable even without a scanner: the bridge
+        // re-detects hardware on every scan request.
+        status.textContent = data.scanner_available
+            ? `✔ Connected — scanner: ${data.scanner_name}`
+            : "✔ Connected — no scanner detected; the bridge will look again when you scan";
+    }
+    if (data.type === "scanning") {
+        setScanning(true);
+    }
     if (data.type === "scan_complete") {
+        setScanning(false);
         addDocument(data.image, "Scanned Document");
         showMessage("Document scanned successfully.", "green");
     }
     if (data.type === "error") {
+        setScanning(false);
         showMessage(data.message, "red");
     }
 }
@@ -199,6 +236,8 @@ function handleScan() {
         showMessage("ScannerBridge is not connected.", "red");
         return;
     }
+    if (scanning) return;
+    setScanning(true); // claim immediately so a double-click can't send twice
     ws.send(JSON.stringify({ type: "scan", dpi: 200 }));
 }
 
@@ -216,10 +255,56 @@ function handleFileUpload(evt) {
     }
 }
 
+/* Persistence: the gallery survives page reloads via localStorage */
+function loadDocuments() {
+    try {
+        const raw = localStorage.getItem(CONFIG.STORAGE_KEY);
+        scannedDocs = raw ? JSON.parse(raw) : [];
+    } catch (e) {
+        console.warn("Could not restore saved documents", e);
+        scannedDocs = [];
+    }
+    docSeq = scannedDocs.length;
+    updateDocuments();
+}
+
+function persistDocuments() {
+    // On quota errors, persist as many of the newest documents as fit;
+    // everything stays visible in the current session either way.
+    const docs = [...scannedDocs];
+    let evicted = 0;
+    for (;;) {
+        try {
+            localStorage.setItem(CONFIG.STORAGE_KEY, JSON.stringify(docs));
+            break;
+        } catch (e) {
+            if (docs.length === 0) {
+                console.warn("Could not persist documents", e);
+                break;
+            }
+            docs.shift();
+            evicted++;
+        }
+    }
+    if (evicted > 0) {
+        showMessage(
+            `Browser storage is full — the ${evicted} oldest document(s) won't survive a page refresh.`,
+            "yellow"
+        );
+    }
+}
+
 /* Add Document */
 function addDocument(data, name) {
-    scannedDocs.push({ id: Date.now(), data, name });
+    scannedDocs.push({ id: `${Date.now()}-${docSeq++}`, data, name });
     updateDocuments();
+    persistDocuments();
+}
+
+function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
 }
 
 /* Document Display */
@@ -238,21 +323,27 @@ function updateDocuments() {
 
     grid.innerHTML = scannedDocs.map(doc => `
         <div class="bg-gray-50 rounded p-3 shadow relative">
-            <button class="absolute top-2 right-2 text-red-500" onclick="removeDocument(${doc.id})">✖</button>
+            <button class="absolute top-2 right-2 text-red-500" onclick="removeDocument('${doc.id}')">✖</button>
             <img src="${doc.data}" class="w-full h-40 object-cover rounded mb-2">
-            <p class="text-sm">${doc.name}</p>
+            <p class="text-sm">${escapeHtml(doc.name)}</p>
         </div>
     `).join("");
 }
 
 function removeDocument(id) {
-    scannedDocs = scannedDocs.filter(d => d.id !== id);
+    scannedDocs = scannedDocs.filter(d => String(d.id) !== String(id));
     updateDocuments();
+    persistDocuments();
 }
 
 function clearAllDocuments() {
     scannedDocs = [];
     updateDocuments();
+    try {
+        localStorage.removeItem(CONFIG.STORAGE_KEY);
+    } catch (e) {
+        console.warn("Could not clear saved documents", e);
+    }
 }
 
 /* Alerts */
@@ -263,7 +354,10 @@ function showMessage(text, color="blue") {
     alert.classList.remove("hidden");
 }
 
-window.onload = connectToBridge;
+window.onload = () => {
+    loadDocuments();
+    connectToBridge();
+};
 </script>
 
 </body>
