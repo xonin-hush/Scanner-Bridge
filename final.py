@@ -8,6 +8,7 @@ import websockets
 import json
 import base64
 import logging
+import logging.handlers
 import sys
 from pathlib import Path
 from typing import Optional, Set, List
@@ -16,7 +17,6 @@ from PIL import Image
 import io
 import ctypes
 import os
-import winreg
 import subprocess
 import shutil
 import time
@@ -42,16 +42,16 @@ def ensure_installed(app_name="ScannerBridge"):
                 # Compare file sizes and modification times
                 current_stat = os.stat(current_path)
                 target_stat = os.stat(target_path)
-                if (current_stat.st_size == target_stat.st_size and 
+                if (current_stat.st_size == target_stat.st_size and
                     current_stat.st_mtime <= target_stat.st_mtime):
                     # Target is up to date, just relaunch from there
-                    print(f"[Install] Using existing installation at {target_path}")
+                    logger.info(f"[Install] Using existing installation at {target_path}")
                     os.startfile(target_path)
                     sys.exit(0)
-            
+
             # Copy to target location
             shutil.copy2(sys.executable, target_path)
-            print(f"[Install] Copied self to {target_path}")
+            logger.info(f"[Install] Copied self to {target_path}")
             
             # Small delay to ensure file is fully written
             time.sleep(0.5)
@@ -63,14 +63,14 @@ def ensure_installed(app_name="ScannerBridge"):
             )
             sys.exit(0)
         except Exception as e:
-            print(f"[Install] Failed to copy self: {e}")
+            logger.error(f"[Install] Failed to copy self: {e}")
             # Continue anyway - might already be in the right place
 
 def run_as_admin():
     """Relaunch the script with admin privileges if not already elevated."""
     try:
         is_admin = ctypes.windll.shell32.IsUserAnAdmin()
-    except:
+    except Exception:
         is_admin = False
 
     if not is_admin:
@@ -98,23 +98,23 @@ def add_to_startup(app_name="ScannerBridge", exe_path=None):
         )
         if result.returncode == 0:
             # Task exists, update it to ensure it uses the correct path
-            print(f"[Startup] Task '{app_name}' already exists, updating...")
+            logger.info(f"[Startup] Task '{app_name}' already exists, updating...")
             try:
                 subprocess.run([
                     "schtasks", "/Change", "/TN", app_name,
                     "/TR", exe_path,
                     "/RL", "HIGHEST"
                 ], check=True, capture_output=True, timeout=10)
-                print(f"[Startup] Task '{app_name}' updated successfully.")
+                logger.info(f"[Startup] Task '{app_name}' updated successfully.")
                 return True
             except subprocess.CalledProcessError as e:
-                print(f"[Startup] Failed to update task: {e.stderr.decode(errors='ignore', encoding='utf-8')}")
+                logger.warning(f"[Startup] Failed to update task: {e.stderr.decode(errors='ignore', encoding='utf-8')}")
                 # Try to delete and recreate
                 try:
-                    subprocess.run(["schtasks", "/Delete", "/TN", app_name, "/F"], 
+                    subprocess.run(["schtasks", "/Delete", "/TN", app_name, "/F"],
                                  capture_output=True, timeout=5)
-                except:
-                    pass
+                except Exception:
+                    logger.debug("[Startup] Failed to delete existing task", exc_info=True)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         # Task doesn't exist, will create it
         pass
@@ -141,18 +141,18 @@ def add_to_startup(app_name="ScannerBridge", exe_path=None):
             timeout=5
         )
         if verify_result.returncode == 0:
-            print(f"[Startup] Task '{app_name}' created and verified successfully.")
+            logger.info(f"[Startup] Task '{app_name}' created and verified successfully.")
             return True
         else:
-            print(f"[Startup] Task creation may have failed - verification failed.")
+            logger.warning("[Startup] Task creation may have failed - verification failed.")
             return False
-            
+
     except subprocess.TimeoutExpired:
-        print(f"[Startup] Task creation timed out.")
+        logger.warning("[Startup] Task creation timed out.")
         return False
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr.decode(errors='ignore', encoding='utf-8') if e.stderr else str(e)
-        print(f"[Startup] Failed to create scheduled task: {error_msg}")
+        logger.warning(f"[Startup] Failed to create scheduled task: {error_msg}")
         return False
 def ensure_single_instance(lock_name="scanner_bridge.lock"):
     """Prevent multiple running instances using a file-based lock."""
@@ -171,7 +171,7 @@ def ensure_single_instance(lock_name="scanner_bridge.lock"):
                 handle = kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, old_pid)
                 if handle:
                     kernel32.CloseHandle(handle)
-                    print("[Startup] Instance already running, exiting.")
+                    logger.info("[Startup] Instance already running, exiting.")
                     sys.exit(0)
             except Exception:
                 pass  # Process doesn't exist or can't access it
@@ -188,7 +188,7 @@ def ensure_single_instance(lock_name="scanner_bridge.lock"):
         try:
             if os.path.exists(lock_path):
                 os.remove(lock_path)
-        except:
+        except Exception:
             pass
     atexit.register(remove_lock)
 
@@ -213,14 +213,30 @@ class UTF8StreamHandler(logging.StreamHandler):
             sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
 
 
-logging.basicConfig(
-    level=CONFIG['log_level'],
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('scanner_bridge.log', encoding='utf-8'),
-        UTF8StreamHandler()
-    ]
-)
+def default_log_path() -> str:
+    """Absolute log location: install dir on Windows, else next to this script."""
+    if sys.platform == 'win32':
+        log_dir = os.path.join(os.getenv('LOCALAPPDATA', '.'), 'Programs', 'ScannerBridge')
+    else:
+        log_dir = os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(log_dir, exist_ok=True)
+    return os.path.join(log_dir, 'scanner_bridge.log')
+
+
+def setup_logging():
+    """Configure rotating file + console logging. Called from main(), not at import."""
+    handlers = [logging.handlers.RotatingFileHandler(
+        default_log_path(), maxBytes=1_000_000, backupCount=3, encoding='utf-8'
+    )]
+    if sys.stderr is not None:  # absent in pyinstaller --noconsole builds
+        handlers.append(UTF8StreamHandler())
+    logging.basicConfig(
+        level=CONFIG['log_level'],
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=handlers
+    )
+
+
 logger = logging.getLogger(__name__)
 
 # For Windows TWAIN support
@@ -229,7 +245,6 @@ try:
     TWAIN_AVAILABLE = True
 except ImportError:
     TWAIN_AVAILABLE = False
-    logger.warning("TWAIN not available. Install: pip install python-twain")
 
 # For Windows WIA support (alternative to TWAIN)
 WIA_AVAILABLE = False
@@ -239,7 +254,7 @@ if sys.platform == 'win32':
         import pythoncom
         WIA_AVAILABLE = True
     except ImportError:
-        logger.info("WIA not available. Install: pip install pywin32")
+        pass
 
 class ScannerBridge:
     def __init__(self):
@@ -734,12 +749,18 @@ def main():
     # Set UTF-8 encoding for Windows console early
     if sys.platform == 'win32':
         try:
-            import locale
-            if sys.stdout.encoding != 'utf-8':
+            if sys.stdout and sys.stdout.encoding != 'utf-8':
                 sys.stdout.reconfigure(encoding='utf-8')
-        except:
+        except Exception:
             pass
-    
+
+    setup_logging()
+
+    if not TWAIN_AVAILABLE:
+        logger.warning("TWAIN not available. Install: pip install python-twain")
+    if sys.platform == 'win32' and not WIA_AVAILABLE:
+        logger.info("WIA not available. Install: pip install pywin32")
+
     if sys.platform == "win32":
         # First ensure we're installed to a safe location
         ensure_installed("ScannerBridge")

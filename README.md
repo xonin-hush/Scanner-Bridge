@@ -53,7 +53,7 @@ Scanner Bridge is a two-part solution that lets any modern browser drive a local
    python final.py
    ```
    - On first launch the script copies itself to `%LOCALAPPDATA%\\Programs\\ScannerBridge`, restarts with administrative rights, creates/updates a Task Scheduler entry so it auto-starts on logon, and enforces a single-running instance.
-   - Logs are written to `scanner_bridge.log` alongside the executable.
+   - Logs are written to `scanner_bridge.log` in `%LOCALAPPDATA%\Programs\ScannerBridge` (rotated at 1 MB, 3 backups kept). When running from source on other platforms, the log lands next to `final.py`.
 6. *(Optional)* **Bundle as an executable** if you prefer distribution without Python:
    ```powershell
    pip install pyinstaller
