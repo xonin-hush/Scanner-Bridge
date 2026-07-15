@@ -73,18 +73,28 @@ Scanner Bridge is a two-part solution that lets any modern browser drive a local
 
 ## Configuration
 
-The workstation service reads from the `CONFIG` dictionary near the top of `final.py`. Key options:
+The service starts from the `DEFAULT_CONFIG` dictionary near the top of `final.py` and shallow-merges an optional `config.json` placed next to the executable (or next to `final.py` when running from source). Invalid or missing files are ignored with a logged warning, so a bad config can never keep the bridge from starting. Key options:
 
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `host` | `localhost` | Interface bound by the WebSocket server. Change to `0.0.0.0` to expose the bridge to the LAN. |
 | `port` | `8765` | WebSocket port. Must match the `WS_URL` used by the web UI. |
-| `default_dpi` | `200` | DPI used when the UI issues a `scan` command without specifying `dpi`. |
+| `default_dpi` | `200` | DPI used when the UI issues a `scan` command without specifying `dpi`. Requested values are clamped to 100–600. |
 | `max_clients` | `10` | Concurrent browser connections permitted. Additional clients receive an error immediately. |
-| `allowed_origins` | `['http://localhost', 'http://127.0.0.1']` | Hosts allowed to establish a socket (extend this list when deploying on an intranet). |
-| `log_level` | `logging.INFO` | Minimum level recorded both in `scanner_bridge.log` and stdout. |
+| `allowed_origin_hosts` | `["localhost", "127.0.0.1"]` | Browser origin hostnames allowed to open a socket (extend this list when deploying on an intranet). |
+| `log_level` | `INFO` | Minimum level recorded in `scanner_bridge.log` and on the console. Use a string such as `"DEBUG"` in `config.json`. |
+| `scan_timeout_seconds` | `300` | How long a single scan may run before the bridge gives up and frees the scanner for new requests. |
+| `port_retry_seconds` / `port_retry_attempts` | `10` / `30` | How often and how many times to retry binding the WebSocket port when it is temporarily in use. |
 
-Update `CONFIG` before packaging or restart the service to apply changes when running from source.
+Example `config.json`:
+
+```json
+{
+  "port": 9000,
+  "log_level": "DEBUG",
+  "scan_timeout_seconds": 120
+}
+```
 
 ## WebSocket contract
 

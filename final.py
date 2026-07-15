@@ -193,15 +193,56 @@ def ensure_single_instance(lock_name="scanner_bridge.lock"):
     atexit.register(remove_lock)
 
 
-# Configuration
-CONFIG = {
+# Configuration defaults; override via an optional config.json next to the app
+DEFAULT_CONFIG = {
     'host': 'localhost',
     'port': 8765,
     'default_dpi': 200,
     'max_clients': 10,
-    'allowed_origins': ['http://localhost', 'http://127.0.0.1'],
-    'log_level': logging.INFO
+    'allowed_origin_hosts': ['localhost', '127.0.0.1'],
+    'log_level': logging.INFO,
+    'scan_timeout_seconds': 300,
+    'port_retry_seconds': 10,
+    'port_retry_attempts': 30,
 }
+
+CONFIG = dict(DEFAULT_CONFIG)
+
+
+def app_dir() -> Path:
+    """Directory holding the frozen exe, or this script — where config.json lives."""
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent
+
+
+def load_config(config_path: Optional[Path] = None) -> dict:
+    """Return DEFAULT_CONFIG shallow-merged with config.json, if present and valid."""
+    config = dict(DEFAULT_CONFIG)
+    if config_path is None:
+        config_path = app_dir() / 'config.json'
+    try:
+        with open(config_path, encoding='utf-8') as f:
+            overrides = json.load(f)
+        if isinstance(overrides, dict):
+            config.update(overrides)
+            logger.info(f"Loaded config overrides from {config_path}")
+        else:
+            logger.warning(f"Ignoring {config_path}: expected a JSON object")
+    except FileNotFoundError:
+        pass
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"Ignoring invalid config {config_path}: {e}")
+    return config
+
+
+def clamp_dpi(dpi) -> int:
+    """Clamp a client-requested DPI to the supported 100-600 range."""
+    try:
+        dpi = int(dpi)
+    except (TypeError, ValueError):
+        return DEFAULT_CONFIG['default_dpi']
+    return max(100, min(600, dpi))
 
 # Setup logging with UTF-8 encoding for Windows
 class UTF8StreamHandler(logging.StreamHandler):
@@ -420,8 +461,8 @@ class ScannerBridge:
         
         try:
             # Validate DPI
-            dpi = max(100, min(600, dpi))
-            
+            dpi = clamp_dpi(dpi)
+
             # Configure scanner
             if not self.configure_scanner(dpi):
                 return None
@@ -755,6 +796,12 @@ def main():
             pass
 
     setup_logging()
+
+    CONFIG.update(load_config())
+    level = CONFIG['log_level']
+    if isinstance(level, str):
+        level = getattr(logging, level.upper(), logging.INFO)
+    logging.getLogger().setLevel(level)
 
     if not TWAIN_AVAILABLE:
         logger.warning("TWAIN not available. Install: pip install python-twain")
